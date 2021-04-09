@@ -111,9 +111,12 @@ def create_user(username: str, password: str) -> User:
     memloc_sk = memloc.Make()
     memloc_salt = memloc.Make()
     memloc_pwd = memloc.Make()
+    memloc_hmac = memloc.Make()
 
     # encrypt the user sk
     enc_user_sk = crypto.SymmetricEncrypt(user_key, crypto.SecureRandom(KEY_LEN), bytes(user_sk))
+    # generate the hmac for the salted_pwd_hash + salt + enc_user_sk
+    user_hmac = crypto.HMAC(user_key, pwd_salted_hash + salt + enc_user_sk)
 
     # store the public key in the keyserver
     try:
@@ -125,12 +128,14 @@ def create_user(username: str, password: str) -> User:
     dataserver.Set(memloc_sk, enc_user_sk)
     dataserver.Set(memloc_salt, salt)
     dataserver.Set(memloc_pwd, pwd_salted_hash)
+    dataserver.Set(memloc_hmac, user_hmac)
 
     # create dictionary of all memlocs
     user_memlocs = {
         "password": memloc_pwd,
         "sk": memloc_sk,
         "salt": memloc_salt,
+        "hmac": memloc_hmac,
     }
     # store this dictionary in the user_memloc created above
     dataserver.Set(user_memloc, util.ObjectToBytes(user_memlocs))
@@ -149,14 +154,26 @@ def authenticate_user(username: str, password: str) -> User:
     server_pwd_salted_hash = dataserver.Get(user_memlocs.get("password"))
     # retrieve the salt
     server_salt = dataserver.Get(user_memlocs.get("salt"))
+    # retrieve the encrypted private key
+    enc_user_sk = dataserver.Get(user_memlocs.get("sk"))
+    # retrieve the HMAC
+    server_hmac = dataserver.Get(user_memlocs.get("hmac"))
+
+    # generate the user symmetric key
+    user_key = crypto.PasswordKDF(password, server_salt, KEY_LEN)
+
+    # compute the HMAC
+    hmac = crypto.HMAC(user_key, server_pwd_salted_hash + server_salt + enc_user_sk)
+
+    if not crypto.HMACEqual(hmac, server_hmac):
+        raise util.DropboxError("Cannot authenticate user. Data has been tampered with!")
 
     # compute the salted hash given the entered password
     pwd_salted_hash = crypto.Hash(util.ObjectToBytes(password) + server_salt)
 
     # check if they are equal
     if pwd_salted_hash == server_pwd_salted_hash:
-        # generate the user symmetric key and create the user
-        user_key = crypto.PasswordKDF(password, server_salt, KEY_LEN)
+        # generate the user
         return User(username, user_key)
     else:
         raise util.DropboxError("Could not authenticate user")
