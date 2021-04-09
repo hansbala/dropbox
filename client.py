@@ -33,7 +33,7 @@ SALT_LEN = 16       # 16 bytes salt length
 KEY_LEN = 16        # 16 bytes is the symmetric key length
 
 class User:
-    def __init__(self, username, user_salt, user_pk, user_sk, user_symmetric_key, user_hmac) -> None:
+    def __init__(self, username, key) -> None:
         """
         Class constructor for the `User` class.
 
@@ -41,46 +41,14 @@ class User:
         of this function.
         """
         self.username = username
-        self.user_salt = user_salt
-        self.user_pk = user_pk
-        self.user_sk = user_sk
-        self.user_symmetric_key = user_symmetric_key
-        self.user_hmac = user_hmac
-
-        # now that we have all the required info, we need to store the public key
-        # and this above generated data inside the keyserver and the dataserver
-        # create the python dictionary which will be stored on the data server
-        user_data_dict = {
-            'username': self.username,
-            'hashed_password': crypto.Hash(self.user_salt + self.password),
-            'user_sk_encrypted': crypto.SymmetricEncrypt(self.user_symmetric_key, crypto.SecureRandom(KEY_LEN), self.user_sk),
-            'user_hmac': self.user_hmac,
-        }
-        # get a memloc from the username (so that we can consistently access this location)
-        try:
-            user_data_memloc = memloc.MakeFromBytes(bytes(self.username))
-        except ValueError:
-            raise util.DropboxError("input to MakeFromBytes is not 16 bytes in length.")
-        # store the user_data_bytes in this memory location
-        try:
-            dataserver.Set(user_data_memloc, util.ObjectToBytes(user_data_dict))
-        except ValueError:
-            raise util.DropboxError("dataserver requires storage to be in bytes.")
-
-        # Store the public key in the keyserver
-        try:
-            keyserver.Set(username, user_pk)
-        except ValueError:
-            raise util.DropboxError("user already has a corresponding public key in database. Cannot create same username.")
-
+        self.user_key = key
 
     def upload_file(self, filename: str, data: bytes) -> None:
         """
         The specification for this function is at:
         http://dropbox.crewmate.academy/client-api/storage/upload-file.html
         """
-        # TODO: Implement!
-        raise util.DropboxError("Not Implemented")
+
 
     def download_file(self, filename: str) -> bytes:
         """
@@ -127,21 +95,68 @@ def create_user(username: str, password: str) -> User:
     The specification for this function is at:
     http://dropbox.crewmate.academy/client-api/authentication/create-user.html
     """
-    # STEP 1: Create a salt for the user
-    user_salt = crypto.SecureRandom(SALT_LEN)
-    # STEP 2: Generate a PK/SK pair
+    # generate the memloc where the user data is stored
+    user_memloc = memloc.MakeFromBytes(crypto.Hash(util.ObjectToBytes(username))[:16])
+
+    # generate the pk, sk for the user
     user_pk, user_sk = crypto.AsymmetricKeyGen()
-    # STEP 3: Generate a symmetric key for the user
-    user_symmetric_key = crypto.PasswordKDF(password, user_salt, KEY_LEN)
-    # STEP 4: Generate an HMAC for the (PW + SALT) + SK with the <user_symmetric_key>
-    user_hmac = crypto.HMAC(user_symmetric_key, password + user_salt + user_sk)
+    # generate the salt for the user
+    salt = crypto.SecureRandom(SALT_LEN)
+    # generate the user symmetric key
+    user_key = crypto.PasswordKDF(password, salt, KEY_LEN)
+    # create the password hash
+    pwd_salted_hash = crypto.Hash(util.ObjectToBytes(password) + salt)
     
-    return User(username, user_salt, user_pk, user_sk, user_symmetric_key, user_hmac)
+    # create each of the memlocs
+    memloc_sk = memloc.Make()
+    memloc_salt = memloc.Make()
+    memloc_pwd = memloc.Make()
+
+    # encrypt the user sk
+    enc_user_sk = crypto.SymmetricEncrypt(user_key, crypto.SecureRandom(KEY_LEN), bytes(user_sk))
+
+    # store the public key in the keyserver
+    try:
+        keyserver.Set(username, user_pk)
+    except:
+        raise util.DropboxError("Public key for user already exists. Cannot create user!")
+    
+    # store the necessary stuff in the memlocs
+    dataserver.Set(memloc_sk, enc_user_sk)
+    dataserver.Set(memloc_salt, salt)
+    dataserver.Set(memloc_pwd, pwd_salted_hash)
+
+    # create dictionary of all memlocs
+    user_memlocs = {
+        "password": memloc_pwd,
+        "sk": memloc_sk,
+        "salt": memloc_salt,
+    }
+    # store this dictionary in the user_memloc created above
+    dataserver.Set(user_memloc, util.ObjectToBytes(user_memlocs))
+    return User(username, user_key)
 
 def authenticate_user(username: str, password: str) -> User:
     """
     The specification for this function is at:
     http://dropbox.crewmate.academy/client-api/authentication/authenticate-user.html
     """
-    # TODO: Implement!
-    raise util.DropboxError("Not Implemented")
+    # get the user memloc where it is stored
+    user_memloc = memloc.MakeFromBytes(crypto.Hash(util.ObjectToBytes(username))[:16])
+    # retrieve the user memlocs
+    user_memlocs = util.BytesToObject(dataserver.Get(user_memloc))
+    # retrieve the password hash
+    server_pwd_salted_hash = dataserver.Get(user_memlocs.get("password"))
+    # retrieve the salt
+    server_salt = dataserver.Get(user_memlocs.get("salt"))
+
+    # compute the salted hash given the entered password
+    pwd_salted_hash = crypto.Hash(util.ObjectToBytes(password) + server_salt)
+
+    # check if they are equal
+    if pwd_salted_hash == server_pwd_salted_hash:
+        # generate the user symmetric key and create the user
+        user_key = crypto.PasswordKDF(password, server_salt, KEY_LEN)
+        return User(username, user_key)
+    else:
+        raise util.DropboxError("Could not authenticate user")
