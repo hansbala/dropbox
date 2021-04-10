@@ -98,6 +98,34 @@ class ClientTests(unittest.TestCase):
         """
         self.assertTrue(True)
 
+    
+    def test_append_and_download_file_(self):
+        """
+        Simple test that tests that append_file works the way that it is supposed to.
+        This test also tests multiple appends
+        """
+
+        u = create_user("usr", "pswd")
+
+        data_to_be_uploaded = b'testing data'
+        u.upload_file("file1", data_to_be_uploaded)
+
+        data_to_be_appended = b' test'
+        u.append_file("file1", data_to_be_appended)
+
+        data_to_be_appended2 = b' test1'
+        u.append_file("file1", data_to_be_appended2)
+
+        data_to_be_appended3 = b' test2'
+        u.append_file("file1", data_to_be_appended3)
+        downloaded_data = u.download_file("file1")
+
+        self.assertEqual(downloaded_data, b'testing data test test1 test2')
+
+
+
+
+
 # DO NOT EDIT BELOW THIS LINE ##################################################
 
 if __name__ == '__main__':
