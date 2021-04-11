@@ -122,7 +122,7 @@ class User:
         # store needed info in memlocs
         dataserver.Set(memloc_file_data_memloc_lists,
                     util.ObjectToBytes(file_data_memlocs_list))
-        dataserver.Set(memloc_users, util.ObjectToBytes(users))
+        dataserver.Set(memloc_users, crypto.SymmetricEncrypt(file_symmetric_key, crypto.SecureRandom(KEY_LEN), util.ObjectToBytes(users)))
 
         # accumulate all this file metadata required
         file_metadata = {
@@ -268,7 +268,8 @@ class User:
         except:
             raise util.DropboxError("Could not find file metadata")
         user_memloc = file_metadata["users"]
-        users = util.BytesToObject(dataserver.Get(user_memloc))
+        users_enc = dataserver.Get(user_memloc)
+        users = util.BytesToObject(crypto.SymmetricDecrypt(file_key, users_enc))
         data_locs = file_metadata["data_locs"]
         # now add current user to this dictionary in only one place (array of sender)
         if self.username not in users:
@@ -276,7 +277,7 @@ class User:
         else:
             users[self.username].append(recipient)
         # update the users memloc to hold the new users stuff
-        dataserver.Set(user_memloc, util.ObjectToBytes(users))
+        dataserver.Set(user_memloc, crypto.SymmetricEncrypt(file_key, crypto.SecureRandom(KEY_LEN), util.ObjectToBytes(users)))
         new_file_metadata = {
             "users": user_memloc,
             "data_locs": data_locs,
@@ -342,11 +343,12 @@ class User:
         new_file_key = crypto.SecureRandom(KEY_LEN)
 
         users_memloc = file_metadata["users"]
-        users = util.BytesToObject(dataserver.Get(users_memloc))
+        users_enc = dataserver.Get(users_memloc)
+        users = util.BytesToObject(crypto.SymmetricDecrypt(file_key, users_enc))
         # update users dictionary here
         users_new = self.removeUserRecursive(users, old_recipient)
         # update the users_memloc with the new data
-        dataserver.Set(users_memloc, util.ObjectToBytes(users_new))
+        dataserver.Set(users_memloc, crypto.SymmetricEncrypt(new_file_key, crypto.SecureRandom(KEY_LEN), util.ObjectToBytes(users_new)))
 
         # get the data_locs memloc
         data_locs_memloc = file_metadata["data_locs"]
