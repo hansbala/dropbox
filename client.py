@@ -278,7 +278,7 @@ class User:
         memloc_file_metadata_ptr = memloc.MakeFromBytes(crypto.Hash(util.ObjectToBytes(filename + self.username))[:16])
         try:
             file_metadata_memloc = dataserver.Get(memloc_file_metadata_ptr)
-            file_metadata = util.BytesToObject(crypto.SymmetricDecrypt(file_key, file_metadata_memloc))
+            file_metadata = util.BytesToObject(crypto.SymmetricDecrypt(file_key, dataserver.Get(file_metadata_memloc)))
         except:
             raise util.DropboxError("Could not find file metadata")
         users_memloc = file_metadata["users"]
@@ -302,9 +302,10 @@ class User:
         dataserver.Set(file_metadata_memloc, crypto.SymmetricEncrypt(new_file_key, crypto.SecureRandom(KEY_LEN), util.ObjectToBytes(new_file_metadata)))
 
         for key in users_new:
-            self.distributeKeys(users[key], new_file_key, filename)
+            if key == "owner": continue
+            self.distributeKeys(users_new[key], new_file_key, filename)
 
-    def distributeKeys(self, users: [], new_file_key : bytes, filename : str) -> None:
+    def distributeKeys(self, users, new_file_key, filename) -> None:
         for user in users:
             new_file_key_drop_location = memloc.MakeFromBytes(crypto.Hash(util.ObjectToBytes(filename + user + 'key'))[:16])
             # get the public key
