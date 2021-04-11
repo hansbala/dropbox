@@ -43,6 +43,7 @@ class User:
         """
         self.username = username
         self.user_key = key
+        self.sk = sk
 
     def upload_file(self, filename: str, data: bytes) -> None:
         """
@@ -73,19 +74,29 @@ class User:
 
         # accumulate all this file metadata required
         file_metadata = {
-            "symmetric_key": file_symmetric_key,
+            # "symmetric_key": file_symmetric_key,
             "users": memloc_users,
             "data_locs": memloc_file_data_memloc_lists,
         }
+        # generate a location to store this metadata
+        memloc_file_metadata = memloc.Make()
         # generate a location to store this metadata from the combo of hash(filename + username)
-        memloc_file_metadata = memloc.MakeFromBytes(
+        memloc_file_metadata_ptr = memloc.MakeFromBytes(
             crypto.Hash(util.ObjectToBytes(filename + self.username))[:16])
         # encrypt this file metadata and store it in the above location
         dataserver.Set(
             memloc_file_metadata,
-            crypto.SymmetricEncrypt(self.user_key,
+            crypto.SymmetricEncrypt(file_symmetric_key,
                                     crypto.SecureRandom(KEY_LEN),
                                     util.ObjectToBytes(file_metadata)))
+        # store the pointer to the memloc_file_metadata
+        dataserver.Set(memloc_file_metadata_ptr, memloc_file_metadata)
+        # drop the symmetric key of the file in hash(filename + current user + 'key')
+        file_key_memloc = memloc.MakeFromBytes(crypto.Hash(util.ObjectToBytes(filename + self.username + 'key'))[:16])
+        user_public_key = keyserver.Get(self.username)
+        file_key_encrypted = crypto.AsymmetricEncrypt(user_public_key, file_symmetric_key)
+        # store this in the memloc
+        dataserver.Set(file_key_memloc, file_key_encrypted)
 
     def download_file(self, filename: str) -> bytes:
         """
@@ -93,24 +104,30 @@ class User:
         http://dropbox.crewmate.academy/client-api/storage/download-file.html
         """
         # get the file metadata location
-        memloc_file_metadata = memloc.MakeFromBytes(
+        memloc_file_metadata_ptr = memloc.MakeFromBytes(
             crypto.Hash(util.ObjectToBytes(filename + self.username))[:16])
-        # get the file metadata
         try:
+            memloc_file_metadata = dataserver.Get(memloc_file_metadata_ptr)
+        except:
+            raise util.DropboxError("Could not find file!")
+        # get the file's symmetric key
+        file_key_memloc = memloc.MakeFromBytes(crypto.Hash(util.ObjectToBytes(filename + self.username + 'key'))[:16])
+        try:
+            file_key_encrypted = dataserver.Get(file_key_memloc)
+            file_key = crypto.AsymmetricDecrypt(self.sk, file_key_encrypted)
+            # get the file metadata
             file_metadata = util.BytesToObject(
-                crypto.SymmetricDecrypt(self.user_key,
+                crypto.SymmetricDecrypt(file_key,
                                         dataserver.Get(memloc_file_metadata)))
         except:
             raise util.DropboxError("Could not find file!")
-        # get the file symmetric key
-        file_symmetric_key = file_metadata["symmetric_key"]
         # iterate over all file data locations, decrypt and append to result, and then return the result
         result = bytes()
         file_locations_memloc = file_metadata["data_locs"]
         file_locations = util.BytesToObject(dataserver.Get(file_locations_memloc))
         for file_data_location in file_locations:
             result += crypto.SymmetricDecrypt(
-                file_symmetric_key, dataserver.Get(file_data_location))
+                file_key, dataserver.Get(file_data_location))
         return result
 
     def append_file(self, filename: str, data: bytes) -> None:
@@ -118,67 +135,65 @@ class User:
         The specification for this function is at:
         http://dropbox.crewmate.academy/client-api/storage/append-file.html
         """
-
-  
         # get the file metadata location
-        memloc_file_metadata = memloc.MakeFromBytes(
+        memloc_file_metadata_ptr = memloc.MakeFromBytes(
             crypto.Hash(util.ObjectToBytes(filename + self.username))[:16])
+        memloc_file_metadata = dataserver.Get(memloc_file_metadata_ptr)
+        
+        # get the file's symmetric key
+        file_key_memloc = memloc.MakeFromBytes(crypto.Hash(util.ObjectToBytes(filename + self.username + 'key'))[:16])
 
         # get the file metadata
         try:
+            file_key_encrypted = dataserver.Get(file_key_memloc)
+            file_key = crypto.AsymmetricDecrypt(self.sk, file_key_encrypted)
             file_metadata = util.BytesToObject(
-                crypto.SymmetricDecrypt(self.user_key,
+                crypto.SymmetricDecrypt(file_key,
                                         dataserver.Get(memloc_file_metadata)))
         except:
             raise util.DropboxError("Could not find file!")
 
-        # get the file symmetric key
-        file_symmetric_key = file_metadata["symmetric_key"]
         #get list of memlocs to append new memloc to
         file_locations_memloc = file_metadata["data_locs"]
         loc = dataserver.Get(file_locations_memloc)
         file_locations = util.BytesToObject(loc)
 
         new_append_data = memloc.Make()
-        dataserver.Set(new_append_data, crypto.SymmetricEncrypt(file_symmetric_key,
+        dataserver.Set(new_append_data, crypto.SymmetricEncrypt(file_key,
           crypto.SecureRandom(KEY_LEN), data))
         
         file_locations.append(new_append_data)
         dataserver.Set(file_locations_memloc, util.ObjectToBytes(file_locations))
-
-
 
     def share_file(self, filename: str, recipient: str) -> None:
         """
         The specification for this function is at:
         http://dropbox.crewmate.academy/client-api/sharing/share-file.html
         """
-        # get the file memloc
-        memloc_file_metadata = memloc.MakeFromBytes(crypto.Hash(util.ObjectToBytes(filename + self.username))[:16])
-        # decrypt the file metadata
-        file_metadata = util.BytesToObject(crypto.SymmetricDecrypt(self.user_key, dataserver.Get(memloc_file_metadata)))
-        symmetric_key = file_metadata["symmetric_key"]
-        data_locations_memloc = file_metadata["data_locs"]
-        users = file_metadata["users"]
+        try:
+            # get the file's symmetric key
+            file_key_memloc = memloc.MakeFromBytes(crypto.Hash(util.ObjectToBytes(filename + self.username + 'key'))[:16])
+            file_key_encrypted = dataserver.Get(file_key_memloc)
+            file_key = crypto.AsymmetricDecrypt(self.sk, file_key_encrypted)
+        except:
+            raise util.DropboxError("Could not find file key")
+        
+        # drop this key in hash(filename + sender + recipient + 'key')
+        key_drop_memloc = memloc.MakeFromBytes(crypto.Hash(util.ObjectToBytes(filename + self.username + recipient + 'key'))[:16])
+        # get the public key of the recipient
+        recipient_pk = keyserver.Get(recipient)
+        # encrypt the key with the public key of the user
+        file_symmetric_key_encrypted = crypto.AsymmetricEncrypt(recipient_pk, file_key)
+        # copy the key into this memloc
+        dataserver.Set(key_drop_memloc, file_symmetric_key_encrypted)
 
-        # generate memloc for the receiver
-        receiver_metadata_memloc = memloc.MakeFromBytes(crypto.Hash(filename + recipient)[:16])
-        # get the receiver's public key
-        receiver_pk = keyserver.get("recipient")
+        # drop the location of the file metadata in hash(filename + sender + recipient + 'location')
+        file_metadata_location_memloc = memloc.MakeFromBytes(crypto.Hash(util.ObjectToBytes(filename + self.username + recipient + 'location'))[:16])
+        # get the file metadata location
+        drop_payload = memloc.MakeFromBytes(crypto.Hash(util.ObjectToBytes(filename + self.username))[:16])
+        # TODO: Copy pointer to memloc of file object
 
-        # encrypt the stuff with the recipient's PK
-        enc_key = crypto.AsymmetricEncrypt(receiver_pk, symmetric_key)
-        enc_data_locations = crypto.AsymmetricEncrypt(receiver_pk, data_locations_memloc)
-        enc_users = crypto.AsymmetricEncrypt(receiver_pk, users)
 
-        # drop this stuff for the recipient
-        recipient_file_metadata = {
-            "key": enc_key,
-            "users": users,
-            "data_loc": enc_data_locations,
-        }
-        # encrypt this stuff and store it
-        dataserver.set(receiver_metadata_memloc, util.ObjectToBytes(recipient_file_metadata))
 
 
     def receive_file(self, filename: str, sender: str) -> None:
@@ -187,12 +202,13 @@ class User:
         http://dropbox.crewmate.academy/client-api/sharing/receive-file.html
         """
         # TODO: Implement!
-        self.sk
+        pass
+        # self.sk
 
-        received = memloc.MakeFromBytes(crypto.Hash(filename + self.username + sender)[:16])
+        # received = memloc.MakeFromBytes(crypto.Hash(filename + self.username + sender)[:16])
 
 
-        receiver_pk = keyserver.get(self.username)
+        # receiver_pk = keyserver.get(self.username)
           
         
 
