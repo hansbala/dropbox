@@ -121,7 +121,38 @@ class ClientTests(unittest.TestCase):
         downloaded_data = u.download_file("file1")
 
         self.assertEqual(downloaded_data, b'testing data test test1 test2')
+    
+    def test_remove_user_recursive_1(self):
+        u = create_user("test", "test")
+        users = {
+            "owner": "bob",
+            "bob": ["tim", "hans", "minion1", "minion2"],
+            "tim": ["alice", "yoda", "chungi"],
+            "chungi": ["ross", "minji"],
+            "minji": ["yanker", "rachel"],
+            "rachel": ["boss1", "boss2", "joey"],
+            "hans": ["ugly1", "ugly2"]
+        }
+        result = u.removeUserRecursive(users, "minji")
+        self.assertEqual(True, True)
 
+        # print(result)
+
+    def test_revoke_file(self):
+        bob = create_user("bob", "123")
+        alice = create_user("alice", "123")
+        zach = create_user("zach", "123")
+        
+        bob.upload_file('test', b'This is a test')
+        bob.share_file('test', 'alice')
+        alice.receive_file('test', 'bob')
+        alice.share_file('test', 'zach')
+        zach.receive_file('test', 'alice')
+
+        bob.revoke_file('test', 'alice')
+
+        self.assertRaises(util.DropboxError, lambda: alice.download_file('test'))
+        self.assertRaises(util.DropboxError, lambda: zach.download_file('test'))
 
 
 

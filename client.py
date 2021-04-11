@@ -45,6 +45,13 @@ class User:
         self.user_key = key
         self.sk = sk
 
+    def does_data_exist(self, memloc: bytes) -> bool:
+        try:
+            dataserver.Get(memloc)
+            return True
+        except:
+            return False
+
     def upload_file(self, filename: str, data: bytes) -> None:
         """
         The specification for this function is at:
@@ -190,35 +197,146 @@ class User:
         # drop the location of the file metadata in hash(filename + sender + recipient + 'location')
         file_metadata_location_memloc = memloc.MakeFromBytes(crypto.Hash(util.ObjectToBytes(filename + self.username + recipient + 'location'))[:16])
         # get the file metadata location
-        drop_payload = memloc.MakeFromBytes(crypto.Hash(util.ObjectToBytes(filename + self.username))[:16])
-        # TODO: Copy pointer to memloc of file object
-
-
-
+        drop_payload_loc = memloc.MakeFromBytes(crypto.Hash(util.ObjectToBytes(filename + self.username))[:16])
+        try:
+            drop_payload = dataserver.Get(drop_payload_loc)
+        except:
+            raise util.DropboxError("Could not find file metadata memloc")
+        # copy pointer of memloc to required drop location
+        dataserver.Set(file_metadata_location_memloc, drop_payload)
 
     def receive_file(self, filename: str, sender: str) -> None:
         """
         The specification for this function is at:
         http://dropbox.crewmate.academy/client-api/sharing/receive-file.html
         """
-        # TODO: Implement!
-        pass
-        # self.sk
-
-        # received = memloc.MakeFromBytes(crypto.Hash(filename + self.username + sender)[:16])
-
-
-        # receiver_pk = keyserver.get(self.username)
-          
+        # get the memloc where the key was dropped
+        key_drop_memloc = memloc.MakeFromBytes(crypto.Hash(util.ObjectToBytes(filename + sender + self.username + 'key'))[:16])
+        # get the key
+        try:
+            file_key_encrypted = dataserver.Get(key_drop_memloc)
+        except:
+            raise util.DropboxError("Could not get shared file key from drop location")
+        file_key = crypto.AsymmetricDecrypt(self.sk, file_key_encrypted)
         
+        # get the memloc where the memloc of the file metadata was dropped
+        file_metadata_location_memloc = memloc.MakeFromBytes(crypto.Hash(util.ObjectToBytes(filename + sender + self.username + 'location'))[:16])
+        try:
+            file_metadata_memloc = dataserver.Get(file_metadata_location_memloc)
+        except:
+            raise util.DropboxError("Could not get memloc of file metadata location")
+        
+        # generate the place where we can place the key and the memloc of the file metadata location
+        memloc_file_metadata_ptr = memloc.MakeFromBytes(
+            crypto.Hash(util.ObjectToBytes(filename + self.username))[:16])
+        file_key_memloc = memloc.MakeFromBytes(crypto.Hash(util.ObjectToBytes(filename + self.username + 'key'))[:16])
+        # check if something exists at required locations
+        if self.does_data_exist(memloc_file_metadata_ptr) or self.does_data_exist(file_key_memloc):
+            raise util.DropboxError("Filename already exists for current user")
+        else:
+            # copy over the data to these memory locations
+            dataserver.Set(memloc_file_metadata_ptr, file_metadata_memloc)
+            dataserver.Set(file_key_memloc, file_key_encrypted)
+        
+        # now using file key, we must add ourselves as a user inside users, and then re-encrypt with the
+        # file key
+        try:
+            file_metadata = util.BytesToObject(crypto.SymmetricDecrypt(file_key, dataserver.Get(file_metadata_memloc)))
+        except:
+            raise util.DropboxError("Could not find file metadata")
+        user_memloc = file_metadata["users"]
+        users = util.BytesToObject(dataserver.Get(user_memloc))
+        data_locs = file_metadata["data_locs"]
+        # now add current user to this dictionary in only one place (array of sender)
+        if sender not in users:
+            users[sender] = [self.username]
+        else:
+            users[sender].append(self.username)
+        # update the users memloc to hold the new users stuff
+        dataserver.Set(user_memloc, util.ObjectToBytes(users))
+        new_file_metadata = {
+            "users": user_memloc,
+            "data_locs": data_locs,
+        }
+        encrypted_file_metadata = crypto.SymmetricEncrypt(file_key, crypto.SecureRandom(KEY_LEN), util.ObjectToBytes(new_file_metadata))
+        # store this new metadata in the same location
+        dataserver.Set(file_metadata_memloc, encrypted_file_metadata)
 
     def revoke_file(self, filename: str, old_recipient: str) -> None:
         """
         The specification for this function is at:
         http://dropbox.crewmate.academy/client-api/sharing/revoke-file.html
         """
-        # TODO: Implement!
-        raise util.DropboxError("Not Implemented")
+        try:
+            # get the file's symmetric key
+            file_key_memloc = memloc.MakeFromBytes(crypto.Hash(util.ObjectToBytes(filename + self.username + 'key'))[:16])
+            file_key_encrypted = dataserver.Get(file_key_memloc)
+            file_key = crypto.AsymmetricDecrypt(self.sk, file_key_encrypted)
+        except:
+            raise util.DropboxError("Could not find file key")
+        # get the pointer to file metadata location
+        memloc_file_metadata_ptr = memloc.MakeFromBytes(crypto.Hash(util.ObjectToBytes(filename + self.username))[:16])
+        try:
+            file_metadata_memloc = dataserver.Get(memloc_file_metadata_ptr)
+            file_metadata = util.BytesToObject(crypto.SymmetricDecrypt(file_key, file_metadata_memloc))
+        except:
+            raise util.DropboxError("Could not find file metadata")
+        users_memloc = file_metadata["users"]
+        users = util.BytesToObject(dataserver.Get(users_memloc))
+        # update users dictionary here
+        users_new = self.removeUserRecursive(users, old_recipient)
+        # update the users_memloc with the new data
+        dataserver.Set(users_memloc, util.ObjectToBytes(users_new))
+
+        # get the data_locs memloc
+        data_locs_memloc = file_metadata["data_locs"]
+
+        # generate new key and distribute to remainder of the users
+        new_file_key = crypto.SecureRandom(KEY_LEN)
+        # generate new file metadata payload
+        new_file_metadata = {
+            "users": users_memloc,
+            "data_locs": data_locs_memloc
+        }
+        # re-encrypt the file metadata here and store it in memloc
+        dataserver.Set(file_metadata_memloc, crypto.SymmetricEncrypt(new_file_key, crypto.SecureRandom(KEY_LEN), util.ObjectToBytes(new_file_metadata)))
+
+        for key in users_new:
+            self.distributeKeys(users[key], new_file_key, filename)
+
+    def distributeKeys(self, users: [], new_file_key : bytes, filename : str) -> None:
+        for user in users:
+            new_file_key_drop_location = memloc.MakeFromBytes(crypto.Hash(util.ObjectToBytes(filename + user + 'key'))[:16])
+            # get the public key
+            user_pk = keyserver.Get(user)
+            # encrypt the new key with the public key
+            new_file_key_encrypted = crypto.AsymmetricEncrypt(user_pk, new_file_key)
+            # copy over encrypted file to memloc
+            dataserver.Set(new_file_key_drop_location, new_file_key_encrypted)
+        
+    def removeUserRecursive(self, users, old_recipient):
+        for key in users:
+            # deleting old_recip share 
+            if old_recipient in users[key]:
+                users[key].remove(old_recipient)
+            # deleting other users old_recip shared with
+            if key == old_recipient:
+                for sub_old_recipient in list(users[old_recipient]):
+                    self.removeUserRecursive(users, sub_old_recipient)
+
+        users = {k: v for k, v in users.items() if v != []}
+        return users
+
+
+    # def removeUserHelper(self, users, key, old_recipient):
+    #     #deleting old_recip share 
+    #     if old_recipient in users[key]:
+    #         users[key].remove(old_recipient)
+    #     #deleting other users old_recip shared with
+    #     if key == old_recipient:
+    #         for sub_old_recipient in users[old_recipient]:
+    #             self.removeUserHelper(users, old_recipient, sub_old_recipient)
+    #         del users[old_recipient]
 
 
 def create_user(username: str, password: str) -> User:
@@ -319,3 +437,4 @@ def authenticate_user(username: str, password: str) -> User:
         return User(username, user_key, user_sk)
     else:
         raise util.DropboxError("Could not authenticate user")
+
