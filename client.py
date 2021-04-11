@@ -52,11 +52,56 @@ class User:
         except:
             return False
 
+    def file_exists(self, filename: str) -> bool:
+        memloc_file_metadata_ptr = memloc.MakeFromBytes(
+            crypto.Hash(util.ObjectToBytes(filename + self.username))[:16])
+        try:
+            dataserver.Get(memloc_file_metadata_ptr)
+            return True
+        except:
+            return False
+    
+    def update_file(self, filename: str, data: bytes) -> None:
+        # get the file metadata location
+        memloc_file_metadata_ptr = memloc.MakeFromBytes(
+            crypto.Hash(util.ObjectToBytes(filename + self.username))[:16])
+        memloc_file_metadata = dataserver.Get(memloc_file_metadata_ptr)
+        
+        # get the file's symmetric key
+        file_key_memloc = memloc.MakeFromBytes(crypto.Hash(util.ObjectToBytes(filename + self.username + 'key'))[:16])
+
+        # get the file metadata
+        try:
+            file_key_encrypted = dataserver.Get(file_key_memloc)
+            file_key = crypto.AsymmetricDecrypt(self.sk, file_key_encrypted)
+            file_metadata = util.BytesToObject(
+                crypto.SymmetricDecrypt(file_key,
+                                        dataserver.Get(memloc_file_metadata)))
+        except:
+            raise util.DropboxError("Could not find file!")
+
+        #get list of memlocs to append new memloc to
+        file_locations_memloc = file_metadata["data_locs"]
+        loc = dataserver.Get(file_locations_memloc)
+        file_locations = util.BytesToObject(loc)
+
+        new_append_data = memloc.Make()
+        dataserver.Set(new_append_data, crypto.SymmetricEncrypt(file_key,
+          crypto.SecureRandom(KEY_LEN), data))
+        
+        file_locations = [new_append_data]
+        dataserver.Set(file_locations_memloc, util.ObjectToBytes(file_locations))
+
+
     def upload_file(self, filename: str, data: bytes) -> None:
         """
         The specification for this function is at:
         http://dropbox.crewmate.academy/client-api/storage/upload-file.html
         """
+        if self.file_exists(filename):
+            self.update_file(filename, data)
+            return
+        # new file needs to be created
         # generate a symmetric key for the file
         file_symmetric_key = crypto.SecureRandom(KEY_LEN)
         # create a memloc where the file data will be stored, encrypt, and store it
@@ -76,7 +121,7 @@ class User:
         memloc_users = memloc.Make()
         # store needed info in memlocs
         dataserver.Set(memloc_file_data_memloc_lists,
-                       util.ObjectToBytes(file_data_memlocs_list))
+                    util.ObjectToBytes(file_data_memlocs_list))
         dataserver.Set(memloc_users, util.ObjectToBytes(users))
 
         # accumulate all this file metadata required
@@ -90,7 +135,6 @@ class User:
         # generate a location to store this metadata from the combo of hash(filename + username)
         memloc_file_metadata_ptr = memloc.MakeFromBytes(
             crypto.Hash(util.ObjectToBytes(filename + self.username))[:16])
-        # encrypt this file metadata and store it in the above location
         dataserver.Set(
             memloc_file_metadata,
             crypto.SymmetricEncrypt(file_symmetric_key,
@@ -98,6 +142,8 @@ class User:
                                     util.ObjectToBytes(file_metadata)))
         # store the pointer to the memloc_file_metadata
         dataserver.Set(memloc_file_metadata_ptr, memloc_file_metadata)
+
+        
         # drop the symmetric key of the file in hash(filename + current user + 'key')
         file_key_memloc = memloc.MakeFromBytes(crypto.Hash(util.ObjectToBytes(filename + self.username + 'key'))[:16])
         user_public_key = keyserver.Get(self.username)
@@ -116,18 +162,20 @@ class User:
         try:
             memloc_file_metadata = dataserver.Get(memloc_file_metadata_ptr)
         except:
-            raise util.DropboxError("Could not find file!")
+            raise util.DropboxError("Could not find file metadata memloc")
         # get the file's symmetric key
         file_key_memloc = memloc.MakeFromBytes(crypto.Hash(util.ObjectToBytes(filename + self.username + 'key'))[:16])
         try:
-            file_key_encrypted = dataserver.Get(file_key_memloc)
-            file_key = crypto.AsymmetricDecrypt(self.sk, file_key_encrypted)
+            try:
+                file_key_encrypted = dataserver.Get(file_key_memloc)
+                file_key = crypto.AsymmetricDecrypt(self.sk, file_key_encrypted)
+            except:
+                raise util.DropboxError("cannot find file key")
             # get the file metadata
-            file_metadata = util.BytesToObject(
-                crypto.SymmetricDecrypt(file_key,
-                                        dataserver.Get(memloc_file_metadata)))
+            file_metadata_enc = dataserver.Get(memloc_file_metadata)
+            file_metadata = util.BytesToObject(crypto.SymmetricDecrypt(file_key, file_metadata_enc))
         except:
-            raise util.DropboxError("Could not find file!")
+            raise util.DropboxError("Could not find file metadata")
         # iterate over all file data locations, decrypt and append to result, and then return the result
         result = bytes()
         file_locations_memloc = file_metadata["data_locs"]
@@ -281,6 +329,10 @@ class User:
             file_metadata = util.BytesToObject(crypto.SymmetricDecrypt(file_key, dataserver.Get(file_metadata_memloc)))
         except:
             raise util.DropboxError("Could not find file metadata")
+
+        # generate new key and distribute to remainder of the users
+        new_file_key = crypto.SecureRandom(KEY_LEN)
+
         users_memloc = file_metadata["users"]
         users = util.BytesToObject(dataserver.Get(users_memloc))
         # update users dictionary here
@@ -290,9 +342,14 @@ class User:
 
         # get the data_locs memloc
         data_locs_memloc = file_metadata["data_locs"]
+        data_locs = util.BytesToObject(dataserver.Get(data_locs_memloc))
+        # TODO BUG: reencrypt data with new key
+        for data_loc in data_locs:
+            actual_data = crypto.SymmetricDecrypt(file_key, dataserver.Get(data_loc))
+            new_encrypted_data = crypto.SymmetricEncrypt(new_file_key, crypto.SecureRandom(KEY_LEN), actual_data)
+            # set the new data in this memloc
+            dataserver.Set(data_loc, new_encrypted_data)
 
-        # generate new key and distribute to remainder of the users
-        new_file_key = crypto.SecureRandom(KEY_LEN)
         # generate new file metadata payload
         new_file_metadata = {
             "users": users_memloc,
@@ -304,6 +361,8 @@ class User:
         for key in users_new:
             if key == "owner": continue
             self.distributeKeys(users_new[key], new_file_key, filename)
+        # distribute the key for the owner
+        self.distributeKeys([users_new["owner"]], new_file_key, filename)
 
     def distributeKeys(self, users, new_file_key, filename) -> None:
         for user in users:
@@ -327,17 +386,6 @@ class User:
 
         users = {k: v for k, v in users.items() if v != []}
         return users
-
-
-    # def removeUserHelper(self, users, key, old_recipient):
-    #     #deleting old_recip share 
-    #     if old_recipient in users[key]:
-    #         users[key].remove(old_recipient)
-    #     #deleting other users old_recip shared with
-    #     if key == old_recipient:
-    #         for sub_old_recipient in users[old_recipient]:
-    #             self.removeUserHelper(users, old_recipient, sub_old_recipient)
-    #         del users[old_recipient]
 
 
 def create_user(username: str, password: str) -> User:
@@ -421,21 +469,21 @@ def authenticate_user(username: str, password: str) -> User:
     # decrypt the secret key
     user_sk = crypto.SymmetricDecrypt(user_key, enc_user_sk)
 
-    # compute the HMAC
-    hmac = crypto.HMAC(user_key,
-                       server_pwd_salted_hash + server_salt + enc_user_sk)
-
-    if not crypto.HMACEqual(hmac, server_hmac):
-        raise util.DropboxError(
-            "Cannot authenticate user. Data has been tampered with!")
-
     # compute the salted hash given the entered password
     pwd_salted_hash = crypto.Hash(util.ObjectToBytes(password) + server_salt)
 
     # check if they are equal
-    if pwd_salted_hash == server_pwd_salted_hash:
+    if not pwd_salted_hash == server_pwd_salted_hash:
+        raise util.DropboxError("Could not authenticate user")
+
+    # compute the HMAC
+    hmac = crypto.HMAC(user_key,
+                       server_pwd_salted_hash + server_salt + enc_user_sk)
+
+    if crypto.HMACEqual(hmac, server_hmac):
         # generate the user
         return User(username, user_key, user_sk)
     else:
-        raise util.DropboxError("Could not authenticate user")
+        raise util.DropboxError(
+            "Cannot authenticate user. Data has been tampered with!")
 

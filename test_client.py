@@ -133,7 +133,7 @@ class ClientTests(unittest.TestCase):
             "rachel": ["boss1", "boss2", "joey"],
             "hans": ["ugly1", "ugly2"]
         }
-        result = u.removeUserRecursive(users, "minji")
+        u.removeUserRecursive(users, "minji")
         self.assertEqual(True, True)
 
         # print(result)
@@ -154,7 +154,68 @@ class ClientTests(unittest.TestCase):
         self.assertRaises(util.DropboxError, lambda: alice.download_file('test'))
         self.assertRaises(util.DropboxError, lambda: zach.download_file('test'))
 
+    def test_share_upload(self):
+        bob = create_user("bob", "123")
+        alice = create_user("alice", "123")
+        
+        bob.upload_file('test', b'This is a test')
+        bob.upload_file('test', b'This is another test')
+        bob.share_file('test', 'alice')
+        alice.receive_file('test', 'bob')
 
+        alice.upload_file('test', b'This is written by Alice')
+        bob.revoke_file('test', 'alice')
+
+        expected = b'This is written by Alice'
+        bob_res = bob.download_file('test')
+        # alice_res = alice.download_file('test')
+
+        # print(alice_res)
+
+        self.assertEqual(expected, bob_res)
+        # self.assertEqual(expected, alice_res)
+    
+    def test_share_revoke_file(self):
+        """
+        Update: resolved bug. we were not reencrypting the data with the new file key :(
+        """
+        bob = create_user("bob", "123")
+        alice = create_user('alice', "123")
+
+        bob.upload_file('test', b'this is a test')
+        bob.download_file('test')
+        bob.share_file('test', 'alice')
+        alice.receive_file('test', 'bob')
+        bob.revoke_file('test', 'alice')
+
+        res = bob.download_file('test')
+        expected = b'this is a test'
+
+        self.assertEqual(res, expected)
+
+    
+    def test_upload_dummy1(self):
+        u = create_user("test", "test")
+        u.upload_file('fuckthis', b'test1')
+        u.upload_file('fuckthis', b'test2')
+
+        self.assertEqual(True, True)
+
+    def test_share_and_append(self):
+        bob = create_user("bob", '123')
+        alice = create_user("alice", "123")
+
+        bob.upload_file('test', b'This is a test')
+        bob.share_file('test', 'alice')
+        alice.receive_file('test', 'bob')
+        alice.append_file('test', b'hello')
+
+        bob_res = bob.download_file('test')
+        alice_res = alice.download_file('test')
+        expected = b'This is a testhello'
+
+        self.assertEqual(bob_res, expected)
+        self.assertEqual(alice_res, expected)
 
 
 # DO NOT EDIT BELOW THIS LINE ##################################################
