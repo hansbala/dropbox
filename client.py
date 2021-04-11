@@ -60,6 +60,16 @@ class User:
             return True
         except:
             return False
+
+    def getHMACforFile(self, file_key: bytes, memloc_users, memloc_data_memloc_list) -> bytes:
+        # get the users
+        users_enc = dataserver.Get(memloc_users)
+        # get the data_memloc_list
+        data_memloc_list = util.BytesToObject(dataserver.Get(memloc_data_memloc_list))
+        res_enc = bytes()
+        for data_memloc in data_memloc_list:
+            res_enc += dataserver.Get(data_memloc)
+        return crypto.HMAC(file_key, users_enc + res_enc)
     
     def update_file(self, filename: str, data: bytes) -> None:
         # get the file metadata location
@@ -80,6 +90,12 @@ class User:
         except:
             raise util.DropboxError("Could not find file!")
 
+        # calculate the file hmac against what is found in the file metadata
+        retrieved_hmac = file_metadata["hmac"]
+        computed_hmac = self.getHMACforFile(file_key, file_metadata["users"], file_metadata["data_locs"])
+        if retrieved_hmac != computed_hmac:
+            raise util.DropboxError("Could not verify file integrity and authenticity!")
+
         #get list of memlocs to append new memloc to
         file_locations_memloc = file_metadata["data_locs"]
         loc = dataserver.Get(file_locations_memloc)
@@ -92,6 +108,16 @@ class User:
         file_locations = [new_append_data]
         dataserver.Set(file_locations_memloc, util.ObjectToBytes(file_locations))
 
+        # compute the new hmac
+        users_memloc = file_metadata["users"]
+        new_hmac = self.getHMACforFile(file_key, users_memloc, file_locations_memloc)
+        new_file_metadata = {
+            "users": users_memloc,
+            "data_locs": file_locations_memloc,
+            "hmac": new_hmac,
+        }
+        enc_new_file_metadata = crypto.SymmetricEncrypt(file_key, crypto.SecureRandom(KEY_LEN), util.ObjectToBytes(new_file_metadata))
+        dataserver.Set(memloc_file_metadata, enc_new_file_metadata)
 
     def upload_file(self, filename: str, data: bytes) -> None:
         """
@@ -124,11 +150,15 @@ class User:
                     util.ObjectToBytes(file_data_memlocs_list))
         dataserver.Set(memloc_users, crypto.SymmetricEncrypt(file_symmetric_key, crypto.SecureRandom(KEY_LEN), util.ObjectToBytes(users)))
 
+        # generate an hmac for this file with the file's symmetric key
+        file_hmac = self.getHMACforFile(file_symmetric_key, memloc_users, memloc_file_data_memloc_lists)
+
         # accumulate all this file metadata required
         file_metadata = {
             # "symmetric_key": file_symmetric_key,
             "users": memloc_users,
             "data_locs": memloc_file_data_memloc_lists,
+            "hmac": file_hmac,
         }
         # generate a location to store this metadata
         memloc_file_metadata = memloc.Make()
@@ -175,6 +205,11 @@ class User:
             file_metadata = util.BytesToObject(crypto.SymmetricDecrypt(file_key, file_metadata_enc))
         except:
             raise util.DropboxError("Could not find file metadata")
+        # calculate the file hmac against what is found in the file metadata
+        retrieved_hmac = file_metadata["hmac"]
+        computed_hmac = self.getHMACforFile(file_key, file_metadata["users"], file_metadata["data_locs"])
+        if retrieved_hmac != computed_hmac:
+            raise util.DropboxError("Could not verify file integrity and authenticity!")
         # iterate over all file data locations, decrypt and append to result, and then return the result
         result = bytes()
         file_locations_memloc = file_metadata["data_locs"]
@@ -207,10 +242,19 @@ class User:
         except:
             raise util.DropboxError("Could not find file!")
 
+        # calculate the file hmac against what is found in the file metadata
+        retrieved_hmac = file_metadata["hmac"]
+        computed_hmac = self.getHMACforFile(file_key, file_metadata["users"], file_metadata["data_locs"])
+        if retrieved_hmac != computed_hmac:
+            raise util.DropboxError("Could not verify file integrity and authenticity!")
+
         #get list of memlocs to append new memloc to
         file_locations_memloc = file_metadata["data_locs"]
         loc = dataserver.Get(file_locations_memloc)
         file_locations = util.BytesToObject(loc)
+
+        # get the memloc of the users
+        users_memloc = file_metadata["users"]
 
         new_append_data = memloc.Make()
         dataserver.Set(new_append_data, crypto.SymmetricEncrypt(file_key,
@@ -218,6 +262,16 @@ class User:
         
         file_locations.append(new_append_data)
         dataserver.Set(file_locations_memloc, util.ObjectToBytes(file_locations))
+
+        # compute the new hmac
+        new_hmac = self.getHMACforFile(file_key, users_memloc, file_locations_memloc)
+        new_file_metadata = {
+            "users": users_memloc,
+            "data_locs": file_locations_memloc,
+            "hmac": new_hmac,
+        }
+        enc_new_file_metadata = crypto.SymmetricEncrypt(file_key, crypto.SecureRandom(KEY_LEN), util.ObjectToBytes(new_file_metadata))
+        dataserver.Set(memloc_file_metadata, enc_new_file_metadata)
 
     def share_file(self, filename: str, recipient: str) -> None:
         """
@@ -267,6 +321,13 @@ class User:
             file_metadata = util.BytesToObject(crypto.SymmetricDecrypt(file_key, dataserver.Get(file_metadata_memloc)))
         except:
             raise util.DropboxError("Could not find file metadata")
+
+        # calculate the file hmac against what is found in the file metadata
+        retrieved_hmac = file_metadata["hmac"]
+        computed_hmac = self.getHMACforFile(file_key, file_metadata["users"], file_metadata["data_locs"])
+        if retrieved_hmac != computed_hmac:
+            raise util.DropboxError("Could not verify file integrity and authenticity!")
+
         user_memloc = file_metadata["users"]
         users_enc = dataserver.Get(user_memloc)
         users = util.BytesToObject(crypto.SymmetricDecrypt(file_key, users_enc))
@@ -278,9 +339,13 @@ class User:
             users[self.username].append(recipient)
         # update the users memloc to hold the new users stuff
         dataserver.Set(user_memloc, crypto.SymmetricEncrypt(file_key, crypto.SecureRandom(KEY_LEN), util.ObjectToBytes(users)))
+
+        # compute the new hmac
+        new_hmac = self.getHMACforFile(file_key, user_memloc, data_locs)
         new_file_metadata = {
             "users": user_memloc,
             "data_locs": data_locs,
+            "hmac": new_hmac,
         }
         encrypted_file_metadata = crypto.SymmetricEncrypt(file_key, crypto.SecureRandom(KEY_LEN), util.ObjectToBytes(new_file_metadata))
         # store this new metadata in the same location
@@ -339,6 +404,12 @@ class User:
         except:
             raise util.DropboxError("Could not find file metadata")
 
+        # calculate the file hmac against what is found in the file metadata
+        retrieved_hmac = file_metadata["hmac"]
+        computed_hmac = self.getHMACforFile(file_key, file_metadata["users"], file_metadata["data_locs"])
+        if retrieved_hmac != computed_hmac:
+            raise util.DropboxError("Could not verify file integrity and authenticity!")
+
         # generate new key and distribute to remainder of the users
         new_file_key = crypto.SecureRandom(KEY_LEN)
 
@@ -360,10 +431,14 @@ class User:
             # set the new data in this memloc
             dataserver.Set(data_loc, new_encrypted_data)
 
+        # get the new hmac
+        new_hmac = self.getHMACforFile(new_file_key, users_memloc, data_locs_memloc)
+
         # generate new file metadata payload
         new_file_metadata = {
             "users": users_memloc,
-            "data_locs": data_locs_memloc
+            "data_locs": data_locs_memloc,
+            "hmac": new_hmac,
         }
         # re-encrypt the file metadata here and store it in memloc
         dataserver.Set(file_metadata_memloc, crypto.SymmetricEncrypt(new_file_key, crypto.SecureRandom(KEY_LEN), util.ObjectToBytes(new_file_metadata)))
