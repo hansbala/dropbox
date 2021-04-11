@@ -143,7 +143,6 @@ class User:
         # store the pointer to the memloc_file_metadata
         dataserver.Set(memloc_file_metadata_ptr, memloc_file_metadata)
 
-        
         # drop the symmetric key of the file in hash(filename + current user + 'key')
         file_key_memloc = memloc.MakeFromBytes(crypto.Hash(util.ObjectToBytes(filename + self.username + 'key'))[:16])
         user_public_key = keyserver.Get(self.username)
@@ -253,6 +252,39 @@ class User:
         # copy pointer of memloc to required drop location
         dataserver.Set(file_metadata_location_memloc, drop_payload)
 
+
+        # get the memloc where the memloc of the file metadata was dropped
+        file_metadata_location_memloc = memloc.MakeFromBytes(crypto.Hash(util.ObjectToBytes(filename + self.username))[:16])
+        try:
+            file_metadata_memloc = dataserver.Get(file_metadata_location_memloc)
+        except:
+            raise util.DropboxError("Could not get memloc of file metadata location")
+        # add the user to the 'users' tree in here. So that even if revoke_file is called,
+        # before the receiver calls receive_file, file access will be revoked
+        # now using file key, we must add ourselves as a user inside users, and then re-encrypt with the
+        # file key
+        try:
+            file_metadata = util.BytesToObject(crypto.SymmetricDecrypt(file_key, dataserver.Get(file_metadata_memloc)))
+        except:
+            raise util.DropboxError("Could not find file metadata")
+        user_memloc = file_metadata["users"]
+        users = util.BytesToObject(dataserver.Get(user_memloc))
+        data_locs = file_metadata["data_locs"]
+        # now add current user to this dictionary in only one place (array of sender)
+        if self.username not in users:
+            users[self.username] = [recipient]
+        else:
+            users[self.username].append(recipient)
+        # update the users memloc to hold the new users stuff
+        dataserver.Set(user_memloc, util.ObjectToBytes(users))
+        new_file_metadata = {
+            "users": user_memloc,
+            "data_locs": data_locs,
+        }
+        encrypted_file_metadata = crypto.SymmetricEncrypt(file_key, crypto.SecureRandom(KEY_LEN), util.ObjectToBytes(new_file_metadata))
+        # store this new metadata in the same location
+        dataserver.Set(file_metadata_memloc, encrypted_file_metadata)
+
     def receive_file(self, filename: str, sender: str) -> None:
         """
         The specification for this function is at:
@@ -265,7 +297,7 @@ class User:
             file_key_encrypted = dataserver.Get(key_drop_memloc)
         except:
             raise util.DropboxError("Could not get shared file key from drop location")
-        file_key = crypto.AsymmetricDecrypt(self.sk, file_key_encrypted)
+        # file_key = crypto.AsymmetricDecrypt(self.sk, file_key_encrypted)
         
         # get the memloc where the memloc of the file metadata was dropped
         file_metadata_location_memloc = memloc.MakeFromBytes(crypto.Hash(util.ObjectToBytes(filename + sender + self.username + 'location'))[:16])
@@ -285,30 +317,6 @@ class User:
             # copy over the data to these memory locations
             dataserver.Set(memloc_file_metadata_ptr, file_metadata_memloc)
             dataserver.Set(file_key_memloc, file_key_encrypted)
-        
-        # now using file key, we must add ourselves as a user inside users, and then re-encrypt with the
-        # file key
-        try:
-            file_metadata = util.BytesToObject(crypto.SymmetricDecrypt(file_key, dataserver.Get(file_metadata_memloc)))
-        except:
-            raise util.DropboxError("Could not find file metadata")
-        user_memloc = file_metadata["users"]
-        users = util.BytesToObject(dataserver.Get(user_memloc))
-        data_locs = file_metadata["data_locs"]
-        # now add current user to this dictionary in only one place (array of sender)
-        if sender not in users:
-            users[sender] = [self.username]
-        else:
-            users[sender].append(self.username)
-        # update the users memloc to hold the new users stuff
-        dataserver.Set(user_memloc, util.ObjectToBytes(users))
-        new_file_metadata = {
-            "users": user_memloc,
-            "data_locs": data_locs,
-        }
-        encrypted_file_metadata = crypto.SymmetricEncrypt(file_key, crypto.SecureRandom(KEY_LEN), util.ObjectToBytes(new_file_metadata))
-        # store this new metadata in the same location
-        dataserver.Set(file_metadata_memloc, encrypted_file_metadata)
 
     def revoke_file(self, filename: str, old_recipient: str) -> None:
         """
