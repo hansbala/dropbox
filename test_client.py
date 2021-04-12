@@ -217,6 +217,65 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(bob_res, expected)
         self.assertEqual(alice_res, expected)
 
+    def test_user_shares_to_non_existent(self):
+        bob = create_user("bob", "123")
+
+        bob.upload_file('test', b'This is a test')
+        self.assertRaises(util.DropboxError, lambda: bob.share_file('test', 'alice'))
+
+    def test_revoke_user_who_is_not_shared(self):
+        bob = create_user("bob", "123")
+        alice = create_user("alice", "123")
+
+        bob.upload_file('test', b'This is a test')
+        self.assertRaises(util.DropboxError, lambda: bob.revoke_file('test', 'alice'))
+
+    def test_revoke_oneself(self):
+        bob = create_user("bob", "123")
+
+        bob.upload_file('test', b'This is a test')
+        self.assertRaises(util.DropboxError, lambda: bob.revoke_file('test', 'bob'))
+
+    def test_revoke_before_receive(self):
+        bob = create_user("bob", "123")
+        alice = create_user("alice", "123")
+        bob.upload_file('test', b'this is a test')
+        bob.share_file('test', 'alice')
+        bob.revoke_file('test', 'alice')
+
+        # alice.receive_file('test', 'bob')
+        
+        # alice.receive_file('test', 'bob')
+        # res = alice.download_file('test')
+        # print(res)
+
+        self.assertRaises(util.DropboxError, lambda: alice.receive_file('test', 'bob'))
+
+    def test_adversary(self):
+        bob = create_user("bob", "123")
+
+        bob.upload_file('test', b'this is a test')
+        # print(dataserver.GetMap())
+
+        return True
+
+    def test_undirect_descendant_revoke(self):
+        bob = create_user("bob", "123")
+        alice = create_user("alice", "123")
+        tom = create_user("tom", "123")
+
+        bob.upload_file('test', b'this is a test')
+        bob.share_file('test', 'alice')
+        alice.receive_file('test', 'bob')
+
+        alice.share_file('test', 'tom')
+        tom.receive_file('test', 'alice')
+
+        self.assertRaises(util.DropboxError, lambda: bob.revoke_file('test', 'tom'))
+
+    # def test_attack_upload_revoke(self):
+    #     alice = create_user()
+        
 
 # DO NOT EDIT BELOW THIS LINE ##################################################
 

@@ -290,11 +290,19 @@ class User:
         # drop this key in hash(filename + sender + recipient + 'key')
         key_drop_memloc = memloc.MakeFromBytes(crypto.Hash(util.ObjectToBytes(filename + self.username + recipient + 'key'))[:16])
         # get the public key of the recipient
-        recipient_pk = keyserver.Get(recipient)
+        try:
+            recipient_pk = keyserver.Get(recipient)
+        except:
+            raise util.DropboxError("Could not get user's public key from keyserver")
         # encrypt the key with the public key of the user
         file_symmetric_key_encrypted = crypto.AsymmetricEncrypt(recipient_pk, file_key)
         # copy the key into this memloc
         dataserver.Set(key_drop_memloc, file_symmetric_key_encrypted)
+
+        # drop the sign of the key in hash(filename + sender + recipient + 'keysign')
+        key_sign_drop_memloc = memloc.MakeFromBytes(crypto.Hash(util.ObjectToBytes(filename + self.username + recipient + 'keysign'))[:16])
+        key_signed = crypto.SignatureSign(self.sign_sk, file_symmetric_key_encrypted)
+        dataserver.Set(key_sign_drop_memloc, key_signed)
 
         # drop the location of the file metadata in hash(filename + sender + recipient + 'location')
         file_metadata_location_memloc = memloc.MakeFromBytes(crypto.Hash(util.ObjectToBytes(filename + self.username + recipient + 'location'))[:16])
@@ -359,9 +367,16 @@ class User:
         """
         # get the memloc where the key was dropped
         key_drop_memloc = memloc.MakeFromBytes(crypto.Hash(util.ObjectToBytes(filename + sender + self.username + 'key'))[:16])
+        key_sign_drop_memloc = memloc.MakeFromBytes(crypto.Hash(util.ObjectToBytes(filename + sender + self.username + 'keysign'))[:16])
         # get the key
         try:
             file_key_encrypted = dataserver.Get(key_drop_memloc)
+            file_key_signed = dataserver.Get(key_sign_drop_memloc)
+            # get the public key of the sender and veirfy the key sign
+            sender_sign_pk = keyserver.Get(sender + '_sign')
+            if not crypto.SignatureVerify(sender_sign_pk, file_key_encrypted, file_key_signed):
+                raise util.DropboxError("could not verify that sender has signed the key")
+            file_key = crypto.AsymmetricDecrypt(self.sk, file_key_encrypted)
         except:
             raise util.DropboxError("Could not get shared file key from drop location")
         # file_key = crypto.AsymmetricDecrypt(self.sk, file_key_encrypted)
@@ -372,7 +387,11 @@ class User:
             file_metadata_memloc = dataserver.Get(file_metadata_location_memloc)
         except:
             raise util.DropboxError("Could not get memloc of file metadata location")
-        
+
+        # try to access the file metadata to see if this user still has access
+        if not self.ableToGetMetadata(crypto.SymmetricDecrypt(file_key, dataserver.Get(file_metadata_memloc))):
+            raise util.DropboxError("cannot access file metadata. malicious action or access was revoked.")
+
         # generate the place where we can place the key and the memloc of the file metadata location
         memloc_file_metadata_ptr = memloc.MakeFromBytes(
             crypto.Hash(util.ObjectToBytes(filename + self.username))[:16])
@@ -380,10 +399,37 @@ class User:
         # check if something exists at required locations
         if self.does_data_exist(memloc_file_metadata_ptr) or self.does_data_exist(file_key_memloc):
             raise util.DropboxError("Filename already exists for current user")
-        else:
-            # copy over the data to these memory locations
-            dataserver.Set(memloc_file_metadata_ptr, file_metadata_memloc)
-            dataserver.Set(file_key_memloc, file_key_encrypted)
+        
+        # check the hmac of the file to verify integrity
+        try:
+            file_metadata = util.BytesToObject(crypto.SymmetricDecrypt(file_key, dataserver.Get(file_metadata_memloc)))
+        except:
+            raise util.DropboxError("cannot get file metadata")
+        
+        computed_hmac = self.getHMACforFile(file_key, file_metadata["users"], file_metadata["data_locs"])
+        retrieved_hmac = file_metadata["hmac"]
+        if computed_hmac != retrieved_hmac:
+            raise util.DropboxError("could not verify hmac")
+
+        # copy over the data to these memory locations
+        dataserver.Set(memloc_file_metadata_ptr, file_metadata_memloc)
+        dataserver.Set(file_key_memloc, file_key_encrypted)
+
+    def ableToGetMetadata(self, bytes) -> bool:
+        try:
+            util.BytesToObject(bytes)
+            return True
+        except:
+            return False
+
+    def user_exists_in_tree(self, users, old_recipient) -> bool:
+        for key in users:
+            if key == "owner": continue
+            if old_recipient in users[key]:
+                return True
+            if key == old_recipient:
+                return True
+        return False
 
     def revoke_file(self, filename: str, old_recipient: str) -> None:
         """
@@ -417,6 +463,14 @@ class User:
         users_memloc = file_metadata["users"]
         users_enc = dataserver.Get(users_memloc)
         users = util.BytesToObject(crypto.SymmetricDecrypt(file_key, users_enc))
+        if not self.user_exists_in_tree(users, old_recipient):
+            raise util.DropboxError("Cannot remove user who does not exist in sharing tree")
+        if users["owner"] == old_recipient:
+            raise util.DropboxError("cannot revoke one's own file")
+        owner = users["owner"]
+        if not users[owner] or old_recipient not in users[owner]:
+            raise util.DropboxError("Cannot remove non-direct descendant")
+
         # update users dictionary here
         users_new = self.removeUserRecursive(users, old_recipient)
         # update the users_memloc with the new data
