@@ -34,7 +34,7 @@ KEY_LEN = 16  # 16 bytes is the symmetric key length
 
 
 class User:
-    def __init__(self, username, key, sk) -> None:
+    def __init__(self, username, key, sk, sign_sk) -> None:
         """
         Class constructor for the `User` class.
 
@@ -44,6 +44,7 @@ class User:
         self.username = username
         self.user_key = key
         self.sk = sk
+        self.sign_sk = sign_sk
 
     def does_data_exist(self, memloc: bytes) -> bool:
         try:
@@ -484,6 +485,8 @@ def create_user(username: str, password: str) -> User:
 
     # generate the pk, sk for the user
     user_pk, user_sk = crypto.AsymmetricKeyGen()
+    # generate a verify and sign key for the user
+    user_sign_pk, user_sign_sk = crypto.SignatureKeyGen()
     # generate the salt for the user
     salt = crypto.SecureRandom(SALT_LEN)
     # generate the user symmetric key
@@ -496,23 +499,27 @@ def create_user(username: str, password: str) -> User:
     memloc_salt = memloc.Make()
     memloc_pwd = memloc.Make()
     memloc_hmac = memloc.Make()
+    memloc_sign_sk = memloc.Make()
 
     # encrypt the user sk
     enc_user_sk = crypto.SymmetricEncrypt(user_key,
                                           crypto.SecureRandom(KEY_LEN),
                                           bytes(user_sk))
+    enc_user_sign_sk = crypto.SymmetricEncrypt(user_key, crypto.SecureRandom(KEY_LEN), bytes(user_sign_sk))
     # generate the hmac for the salted_pwd_hash + salt + enc_user_sk
-    user_hmac = crypto.HMAC(user_key, pwd_salted_hash + salt + enc_user_sk)
+    user_hmac = crypto.HMAC(user_key, pwd_salted_hash + salt + enc_user_sk + enc_user_sign_sk)
 
     # store the public key in the keyserver
     try:
         keyserver.Set(username, user_pk)
+        keyserver.Set(username + '_sign', user_sign_pk)
     except:
         raise util.DropboxError(
             "Public key for user already exists. Cannot create user!")
 
     # store the necessary stuff in the memlocs
     dataserver.Set(memloc_sk, enc_user_sk)
+    dataserver.Set(memloc_sign_sk, enc_user_sign_sk)
     dataserver.Set(memloc_salt, salt)
     dataserver.Set(memloc_pwd, pwd_salted_hash)
     dataserver.Set(memloc_hmac, user_hmac)
@@ -522,11 +529,12 @@ def create_user(username: str, password: str) -> User:
         "password": memloc_pwd,
         "sk": memloc_sk,
         "salt": memloc_salt,
+        "sign_sk": memloc_sign_sk,
         "hmac": memloc_hmac,
     }
     # store this dictionary in the user_memloc created above
     dataserver.Set(user_memloc, util.ObjectToBytes(user_memlocs))
-    return User(username, user_key, user_sk)
+    return User(username, user_key, user_sk, user_sign_sk)
 
 
 def authenticate_user(username: str, password: str) -> User:
@@ -545,6 +553,8 @@ def authenticate_user(username: str, password: str) -> User:
     server_salt = dataserver.Get(user_memlocs.get("salt"))
     # retrieve the encrypted private key
     enc_user_sk = dataserver.Get(user_memlocs.get("sk"))
+    # retrieve the encrypted private sign key
+    enc_user_sign_sk = dataserver.Get(user_memlocs.get("sign_sk"))
     # retrieve the HMAC
     server_hmac = dataserver.Get(user_memlocs.get("hmac"))
 
@@ -553,6 +563,9 @@ def authenticate_user(username: str, password: str) -> User:
 
     # decrypt the secret key
     user_sk = crypto.SymmetricDecrypt(user_key, enc_user_sk)
+
+    # decrypt the private sign key
+    user_sign_sk = crypto.SymmetricDecrypt(user_key, enc_user_sign_sk)
 
     # compute the salted hash given the entered password
     pwd_salted_hash = crypto.Hash(util.ObjectToBytes(password) + server_salt)
@@ -563,11 +576,11 @@ def authenticate_user(username: str, password: str) -> User:
 
     # compute the HMAC
     hmac = crypto.HMAC(user_key,
-                       server_pwd_salted_hash + server_salt + enc_user_sk)
+                       server_pwd_salted_hash + server_salt + enc_user_sk + enc_user_sign_sk)
 
     if crypto.HMACEqual(hmac, server_hmac):
         # generate the user
-        return User(username, user_key, user_sk)
+        return User(username, user_key, user_sk, user_sign_sk)
     else:
         raise util.DropboxError(
             "Cannot authenticate user. Data has been tampered with!")
